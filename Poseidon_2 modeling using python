@@ -1,0 +1,133 @@
+import multiprocessing
+from typing import List, Tuple
+
+t = 3
+num_rounds = 8
+PRIME = 2**255 - 19
+R = 2**256  # Montgomery constant
+
+mds_matrix = [
+    [20, 17, 14],
+    [17, 14, 13],
+    [14, 13, 11]
+]
+
+round_constants = [
+    [1, 2, 3],
+    [4, 5, 6],
+    [7, 8, 9],
+    [10, 11, 12],
+    [13, 14, 15],
+    [16, 17, 18],
+    [19, 20, 21],
+    [22, 23, 24]
+]
+
+def montgomery_reduction(x):
+    """Montgomery Reduction."""
+    m = (x * R) % PRIME
+    t = (x + m * PRIME) // R
+    if t < PRIME:
+        return t
+    else:
+        return t - PRIME
+
+def s_box(value):
+    """Applies the Poseidon S-box (x^3 mod PRIME)."""
+    return montgomery_reduction(value ** 3)
+
+def apply_round_constants(state, round_constants):
+    """Adds round constants to the state."""
+    return [montgomery_reduction(state[i] + round_constants[i]) for i in range(len(state))]
+
+def apply_linear_layer(state, mds_matrix):
+    """Applies the linear layer using an MDS matrix."""
+    new_state = [0] * len(state)
+    for i in range(len(state)):
+        new_state[i] = montgomery_reduction(sum(state[j] * mds_matrix[i][j] for j in range(len(state))))
+    return new_state
+
+def poseidon2_permutation(state, mds_matrix, round_constants):
+    """Poseidon2 permutation."""
+    for round in range(num_rounds):
+        if round % 2 == 0:
+            state[0] = s_box(state[0])
+        else:
+            state = [s_box(x) for x in state]
+        state = apply_round_constants(state, round_constants[round][:t])
+        state = apply_linear_layer(state, mds_matrix)
+    return state
+
+def poseidon2_hash(input_data):
+    """Poseidon2 hash function."""
+    state = input_data + [0] * (t - len(input_data))
+    state = poseidon2_permutation(state, mds_matrix, round_constants)
+    return state[0]
+
+def process_chunk(chunk_id, chunk):
+    """Computes Poseidon2 hash for a single chunk."""
+    return chunk_id, poseidon2_hash(chunk)
+
+def worker(chunk_queue, result_queue):
+    while True:
+        chunk_data = chunk_queue.get()
+        if chunk_data is None:
+            break
+        chunk_id, chunk = chunk_data
+        result_queue.put(process_chunk(chunk_id, chunk))
+
+if __name__ == "__main__":
+    input_data = [42, 77, 33, 55, 66, 78, 88, 99, 10, 20, 30, 40,40,40,30]  # Test data
+
+    # Split input data into chunks
+    chunks = [input_data[i:i + t] for i in range(0, len(input_data), t)]
+
+    chunk_queue = multiprocessing.Queue()
+    result_queue = multiprocessing.Queue()
+
+    processes = [multiprocessing.Process(target=worker, args=(chunk_queue, result_queue)) for _ in range(multiprocessing.cpu_count())]
+
+    for p in processes:
+        p.start()
+
+    # Add chunk IDs to maintain order
+    for chunk_id, chunk in enumerate(chunks):
+        chunk_queue.put((chunk_id, chunk))
+
+    for _ in processes:
+        chunk_queue.put(None)
+
+    for p in processes:
+        p.join()
+
+    # Retrieve all hashes from result_queue
+    results = [result_queue.get() for _ in range(len(chunks))]
+
+    # Sort results by chunk ID to maintain original order
+    results.sort(key=lambda x: x[0])
+    hashes = [result[1] for result in results]
+
+    # Print all computed hashes for each chunk
+    print("Computed Hashes:")
+    for i, h in enumerate(hashes):
+        print(f"Chunk {i + 1}: {h:X}")  # Print results in hexadecimal
+
+    # Add function to compute Merkle Tree
+    def compute_merkle_root(hashes):
+        """Computes the Merkle Tree root from a list of hashes."""
+        while len(hashes) > 1:
+            new_hashes = []
+            for i in range(0, len(hashes), 2):
+                if i + 1 < len(hashes):
+                    combined = [hashes[i], hashes[i + 1]]
+                else:
+                    combined = [hashes[i], 0]  # If the number is odd, add 0
+                new_hashes.append(poseidon2_hash(combined))
+            hashes = new_hashes
+        return hashes[0]
+
+    # Compute Merkle Root using computed hashes
+    merkle_root = compute_merkle_root(hashes)
+
+    # Print final Merkle Tree root
+    print(f"Merkle Root: {merkle_root:X}")
